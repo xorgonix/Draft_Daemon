@@ -1,0 +1,2824 @@
+================================================================
+File: ./components/editor_pane.py
+================================================================
+"""
+EditorPane NiceGUI component for AI draft editing with SFT logging and voice typing.
+
+Layout:
+- Top pane: Read-only AI Draft
+- Bottom pane: User edit/dictation area with voice typing button
+- Save & Log SFT button with toast notification
+"""
+
+import json
+from pathlib import Path
+from nicegui import ui
+
+
+class EditorPane(ui.element):
+    """
+    A dual-pane editor component for AI-assisted writing with voice typing.
+    """
+    
+    def __init__(self, sft_log_file=None):
+        super().__init__()
+        
+        # SFT log file path
+        if sft_log_file:
+            self.sft_log_file = Path(sft_log_file)
+        else:
+            self.sft_log_file = Path.cwd() / "sft_pairs.jsonl"
+        
+        self._ai_textarea = None
+        self._user_textarea = None
+        self._save_button = None
+        self._status_label = None
+        self._voice_button = None
+        self._is_recording = False
+        
+        self._build_ui()
+    
+    def _build_ui(self):
+        """Build the polished editor UI with vertical layout."""
+        with self:
+            with ui.column().classes('w-full gap-4'):
+                # Action bar
+                with ui.row().classes('w-full justify-between items-center'):
+                    with ui.row().classes('items-center gap-2'):
+                        ui.icon('save', size='20px').classes('text-gray-600')
+                        ui.label('Actions').classes('font-bold text-gray-700')
+                    
+                    self._save_button = ui.button(
+                        'Save & Log SFT',
+                        icon='save',
+                        on_click=self._handle_save
+                    ).props('color=positive')
+                    self._save_button.disable()
+                
+                # Status label
+                self._status_label = ui.label('').classes('text-sm')
+                
+                # Top pane: AI Draft (read-only)
+                with ui.card().classes('w-full'):
+                    with ui.card_section().classes('bg-blue-50 border-b'):
+                        with ui.row().classes('items-center gap-2'):
+                            ui.icon('smart_toy', size='20px').classes('text-blue-600')
+                            ui.label('AI Draft').classes('font-bold text-blue-800')
+                            ui.label('Read-only').props('chip color=blue-200').classes('text-xs')
+                    
+                    with ui.card_section().classes('p-0'):
+                        self._ai_textarea = ui.textarea() \
+                            .classes('w-full') \
+                            .props('readonly outlined') \
+                            .style('min-height: 350px;')
+                
+                # Bottom pane: User Edit with voice typing
+                with ui.card().classes('w-full'):
+                    with ui.card_section().classes('bg-green-50 border-b'):
+                        with ui.row().classes('items-center justify-between w-full'):
+                            with ui.row().classes('items-center gap-2'):
+                                ui.icon('person', size='20px').classes('text-green-600')
+                                ui.label('Your Edit').classes('font-bold text-green-800')
+                                ui.label('Editable').props('chip color=green-200').classes('text-xs')
+                            
+                            # Voice typing button
+                            self._voice_button = ui.button(
+                                icon='mic',
+                                on_click=self._toggle_voice_typing
+                            ).props('round color=green').tooltip('Click to start/stop voice typing')
+                            self._recording_label = ui.label('').classes('text-xs text-red-600 font-bold')
+                    
+                    with ui.card_section().classes('p-0'):
+                        self._user_textarea = ui.textarea(
+                            on_change=self._on_content_change
+                        ).classes('w-full') \
+                            .props('outlined') \
+                            .style('min-height: 350px;')
+                
+                # Voice typing instructions
+                with ui.row().classes('w-full justify-center'):
+                    ui.markdown('🎤 **Voice Typing:** Click the microphone button and speak. Your words will appear in the text area above. Works best in Chrome/Edge browsers.') \
+                        .classes('text-xs text-gray-500')
+    
+    def _on_content_change(self, e):
+        """Handle content changes in user pane."""
+        ai_val = self._ai_textarea.value if self._ai_textarea else ''
+        user_val = self._user_textarea.value if self._user_textarea else ''
+        if ai_val and user_val:
+            self._save_button.disable(False)
+        else:
+            self._save_button.disable(True)
+    
+    def _handle_save(self):
+        """
+        Handle save button click.
+        Logs SFT pair to JSONL file with toast notification.
+        """
+        ai_text = self._ai_textarea.value if self._ai_textarea else ''
+        user_text = self._user_textarea.value if self._user_textarea else ''
+        
+        if not ai_text or not user_text:
+            ui.notify('⚠️ Both panes must have content to save.', type='warning')
+            return
+        
+        # Create SFT pair
+        sft_pair = {
+            "prompt": ai_text,
+            "completion": user_text,
+            "timestamp": str(Path.cwd())
+        }
+        
+        # Append to JSONL file
+        try:
+            self._log_sft_pair(sft_pair)
+            ui.notify('✓ SFT pair saved successfully!', type='positive',
+                     caption=f'Logged to: {self.sft_log_file.name}')
+            self._status_label.text = f'✓ Last saved: {Path.cwd().name}'
+            self._status_label.classes('text-green-600')
+        except Exception as e:
+            ui.notify(f'✗ Error: {str(e)}', type='negative')
+            self._status_label.text = f'✗ Error: {str(e)}'
+            self._status_label.classes('text-red-600')
+    
+    def _log_sft_pair(self, sft_pair: dict):
+        """Append an SFT pair to the JSONL log file."""
+        self.sft_log_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(self.sft_log_file, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(sft_pair, ensure_ascii=False, indent=2) + '\n')
+    
+    def _toggle_voice_typing(self):
+        """Toggle voice typing on/off using browser's Web Speech API."""
+        self._is_recording = not self._is_recording
+        
+        if self._is_recording:
+            # Start recording
+            self._voice_button.props('color=red icon=mic_off')
+            self._recording_label.text = '● Recording...'
+            ui.notify('🎤 Voice typing started... Speak now!', type='info', timeout=3000)
+            
+            # JavaScript for Web Speech API
+            ui.run_javascript('''
+                if (!window.draftDaemonSpeech) {
+                    window.draftDaemonSpeech = {
+                        recognition: null,
+                        textarea: null,
+                        isRecording: false
+                    };
+                }
+                
+                const speech = window.draftDaemonSpeech;
+                
+                if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+                    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                    speech.recognition = new SpeechRecognition();
+                    speech.recognition.continuous = true;
+                    speech.recognition.interimResults = true;
+                    speech.recognition.lang = 'en-US';
+                    
+                    // Find the textarea element
+                    speech.textarea = document.querySelector('[data-textarea="user"]');
+                    if (!speech.textarea) {
+                        speech.textarea = document.querySelectorAll('textarea')[1];
+                    }
+                    
+                    speech.recognition.onresult = (event) => {
+                        let finalTranscript = '';
+                        for (let i = event.resultIndex; i < event.results.length; ++i) {
+                            if (event.results[i].isFinal) {
+                                finalTranscript += event.results[i][0].transcript + ' ';
+                            }
+                        }
+                        if (finalTranscript && speech.textarea) {
+                            const currentValue = speech.textarea.value || '';
+                            speech.textarea.value = currentValue + finalTranscript;
+                            // Trigger NiceGUI change event
+                            speech.textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                            speech.textarea.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                    };
+                    
+                    speech.recognition.onerror = (event) => {
+                        console.error('Speech recognition error:', event.error);
+                    };
+                    
+                    speech.recognition.start();
+                    speech.isRecording = true;
+                } else {
+                    alert('Voice typing is not supported in your browser. Please use Chrome or Edge.');
+                }
+            ''')
+        else:
+            # Stop recording
+            self._voice_button.props('color=green icon=mic')
+            self._recording_label.text = ''
+            ui.notify('✓ Voice typing stopped', type='positive', timeout=2000)
+            
+            # Stop JavaScript speech recognition
+            ui.run_javascript('''
+                if (window.draftDaemonSpeech && window.draftDaemonSpeech.recognition) {
+                    window.draftDaemonSpeech.recognition.stop();
+                    window.draftDaemonSpeech.isRecording = false;
+                }
+            ''')
+    
+    def set_ai_content(self, content: str):
+        """Set the AI draft content."""
+        if self._ai_textarea:
+            self._ai_textarea.value = content
+            user_val = self._user_textarea.value if self._user_textarea else ''
+            if content and user_val:
+                self._save_button.disable(False)
+            else:
+                self._save_button.disable(True)
+    
+    def get_contents(self) -> dict:
+        """Get both AI and user content."""
+        return {
+            "ai_content": self._ai_textarea.value if self._ai_textarea else '',
+            "user_content": self._user_textarea.value if self._user_textarea else ''
+        }
+
+
+
+================================================================
+File: ./components/kickoff_chat.py
+================================================================
+"""
+KickoffChat NiceGUI component for the Spec Interviewer.
+
+This component provides the chat interface for the project initialization phase,
+where the "Editorial Architect" LLM interviews the user to gather spec requirements.
+"""
+
+import asyncio
+from nicegui import ui
+from workflows.flow import create_spec_interviewer_flow
+from workflows.nodes import ChatInputNode
+
+
+class KickoffChat(ui.element):
+    """
+    A chat interface component for the Spec Interviewer flow.
+    
+    Integrates with Pocket Flow to orchestrate the conversation between
+    the user and the "Editorial Architect" LLM.
+    """
+    
+    def __init__(self, llm_client=None, system_prompt=None):
+        super().__init__()
+        
+        self.llm_client = llm_client
+        self.system_prompt = system_prompt or self._default_system_prompt()
+        
+        # Pocket Flow shared store
+        self.shared = {
+            "system_prompt": self.system_prompt,
+            "chat_history": [],
+            "user_input": None,
+            "llm_response": None,
+            "spec_complete": False,
+            "final_spec": None,
+            "project_name": None
+        }
+        
+        # Flow state
+        self._flow = None
+        self._user_input_queue = asyncio.Queue()
+        self._flow_running = False
+        self._current_response = None
+        
+        self._build_ui()
+    
+    def _default_system_prompt(self) -> str:
+        """Return the default 'Editorial Architect' system prompt."""
+        return """You are the Editorial Architect, an expert in software specification and requirements gathering.
+
+Your role is to interview users about their project ideas and help them create a well-structured OpenSpec specification document.
+
+Guidelines:
+1. Ask clarifying questions to understand the project scope, goals, and requirements
+2. Help the user think through edge cases, constraints, and success criteria
+3. Guide them toward a clear, actionable specification
+4. When you have enough information, output the complete specification in markdown format
+
+Always be supportive, ask one question at a time, and ensure the user feels heard."""
+    
+    def _build_ui(self):
+        """Build the chat interface UI."""
+        with self:
+            # Chat container
+            with ui.column().classes('w-full max-w-3xl mx-auto gap-4'):
+                # Header
+                ui.label('Spec Interviewer').classes('text-h5 text-primary')
+                ui.label('Chat with the Editorial Architect to define your project spec').classes('text-subtitle2 text-gray-600')
+                
+                # Chat messages area (scrollable)
+                self._messages_container = ui.column().classes('w-full h-96 overflow-y-auto border rounded-lg p-4 bg-gray-50')
+                
+                # Input area
+                with ui.row().classes('w-full gap-2'):
+                    self._input_field = ui.input(
+                        placeholder='Describe your project idea...',
+                        on_change=lambda e: self._enable_send()
+                    ).classes('flex-grow')
+                    
+                    self._send_button = ui.button(
+                        'Send',
+                        on_click=self._handle_send,
+                        icon='send'
+                    ).props('round dense').disable()
+                
+                # Status indicator
+                self._status_label = ui.label('').classes('text-sm text-gray-500')
+    
+    def _enable_send(self):
+        """Enable send button when input has content."""
+        if self._input_field.value and self._input_field.value.strip():
+            self._send_button.disable(False)
+        else:
+            self._send_button.disable()
+    
+    def _add_message(self, content: str, role: str):
+        """Add a message bubble to the chat."""
+        with self._messages_container:
+            is_user = role == "user"
+            alignment = "items-end" if is_user else "items-start"
+            bg_color = "bg-blue-600 text-white" if is_user else "bg-white text-gray-800 border"
+            
+            with ui.row().classes(f'w-full {alignment}'):
+                with ui.element('div').classes(f'max-w-[80%] p-3 rounded-lg {bg_color}'):
+                    ui.label(content).classes('text-sm whitespace-pre-wrap')
+    
+    async def _handle_send(self):
+        """Handle user sending a message."""
+        user_message = self._input_field.value.strip()
+        if not user_message:
+            return
+        
+        # Clear input and disable
+        self._input_field.value = ''
+        self._send_button.disable()
+        self._input_field.disable()
+        
+        # Add user message to chat
+        self._add_message(user_message, "user")
+        
+        # Put message in queue for the flow to consume
+        await self._user_input_queue.put(user_message)
+        
+        # Show status
+        self._status_label.text = 'Editorial Architect is thinking...'
+        
+        # Start flow if not running
+        if not self._flow_running:
+            asyncio.create_task(self._run_flow_iteration())
+    
+    def _get_user_input(self):
+        """
+        Callback for ChatInputNode to get user input.
+        This is a blocking call that waits for the next user message.
+        """
+        # For synchronous flow, we need to handle this differently
+        # Return the current response if available
+        if self._current_response:
+            return self._current_response
+        return None
+    
+    async def _run_flow_iteration(self):
+        """Run one iteration of the Pocket Flow."""
+        self._flow_running = True
+        
+        try:
+            # Create fresh flow instance
+            self._flow = create_spec_interviewer_flow()
+            
+            # Get the chat input node and set up callback
+            # We need to inject our async input retrieval
+            
+            # For now, let's run the flow with the current shared state
+            # The flow will need to be adapted for async operation
+            
+            # Run flow in a thread to avoid blocking UI
+            await ui.run_io(lambda: self._run_flow_sync())
+            
+        except Exception as e:
+            self._status_label.text = f'Error: {str(e)}'
+            self._input_field.disable(False)
+            self._flow_running = False
+        finally:
+            self._flow_running = False
+    
+    def _run_flow_sync(self):
+        """Run the flow synchronously (called from IO thread)."""
+        # Inject dependencies into nodes
+        from workflows.nodes import ChatInputNode, LLMEvaluateNode, GenerateSpecNode
+        
+        # Find and configure nodes in the flow
+        # This is a simplified approach - in production we'd use proper dependency injection
+        
+        # For now, just process the shared store through the flow
+        # We'll need to refactor the nodes to work with the UI callback pattern
+        
+        pass
+    
+    def start_conversation(self):
+        """Start a new conversation session."""
+        self.shared = {
+            "system_prompt": self.system_prompt,
+            "chat_history": [],
+            "user_input": None,
+            "llm_response": None,
+            "spec_complete": False,
+            "final_spec": None,
+            "project_name": None
+        }
+        with self._messages_container:
+            self._messages_container.clear()
+        self._add_message("Hello! I'm the Editorial Architect. Tell me about your project idea and I'll help you create a detailed specification.", "assistant")
+        self._status_label.text = ''
+
+
+
+================================================================
+File: ./components/__init__.py
+================================================================
+"""
+NiceGUI components for the Draft Daemon application.
+"""
+
+from .kickoff_chat import KickoffChat
+from .editor_pane import EditorPane
+
+__all__ = ["KickoffChat", "EditorPane"]
+
+
+
+================================================================
+File: ./main.py
+================================================================
+#!/usr/bin/env python3
+"""
+Draft Daemon - Spec Interviewer Chat with Pocket Flow
+Polished UI with consistent navigation and modern design.
+"""
+
+from nicegui import ui
+from workflows.flow import create_spec_interviewer_flow
+from workflows.nodes import LLMEvaluateNode
+from utils.llm_client import LLMClient
+from components.editor_pane import EditorPane
+
+
+EDITORIAL_ARCHITECT_SYSTEM_PROMPT = """
+**Role:**
+You are an Editorial Architect assisting a senior engineer in designing a technical article. Your goal is to guide the user from a loose idea to a concrete, strictly formatted article specification.
+
+**Context:**
+The user writes highly technical, practical articles for other engineers. The tone is analytical, systems-focused, and grounded in real-world operational experience.
+
+**Instructions:**
+1. Ask clarifying questions to understand the project scope, goals, and requirements
+2. Help the user think through edge cases, constraints, and success criteria  
+3. Guide them toward a clear, actionable specification
+4. When you have enough information, output the complete specification in markdown format enclosed in ```markdown code blocks
+
+Always be supportive, ask one question at a time, and ensure the user feels heard.
+"""
+
+
+app_state = {
+    "current_spec": None,
+    "current_project": None,
+    "current_spec_path": None,
+}
+
+
+def add_header(current_page: str = '/'):
+    """Add consistent header with navigation to all pages."""
+    
+    with ui.header().classes('w-full bg-gradient-to-r from-blue-600 to-blue-800 text-white shadow-lg'):
+        with ui.row().classes('w-full max-w-6xl mx-auto items-center justify-between px-4 py-2'):
+            # Logo/Title
+            with ui.row().classes('items-center gap-3'):
+                ui.icon('psychology', size='32px').classes('text-blue-200')
+                ui.label('Draft Daemon').classes('text-xl font-bold')
+                ui.label('OpenSpec').classes('text-sm text-blue-200 mt-1')
+            
+            # Navigation tabs
+            with ui.row().classes('items-center gap-0'):
+                nav_items = [
+                    ('/', 'home', 'Home'),
+                    ('/kickoff', 'chat', 'Spec Interviewer'),
+                    ('/editor', 'edit', 'Editor'),
+                ]
+                
+                for path, icon, label in nav_items:
+                    is_active = current_page == path
+                    with ui.button(icon=icon, on_click=lambda p=path: ui.navigate.to(p)) \
+                        .props('flat dense').classes(
+                            'text-white bg-white/20' if is_active else 'text-white hover:bg-white/10'
+                        ).tooltip(label):
+                        ui.label(label).classes('ml-2 text-sm')
+
+
+def add_footer():
+    """Add consistent footer."""
+    with ui.footer().classes('bg-gray-50 border-t border-gray-200'):
+        with ui.row().classes('w-full justify-center py-3'):
+            ui.markdown('Built with [NiceGUI](https://nicegui.io) • Powered by Ollama') \
+                .classes('text-xs text-gray-500')
+
+
+@ui.page('/')
+def index():
+    """Dashboard with feature overview."""
+    add_header('/')
+    
+    with ui.column().classes('w-full max-w-4xl mx-auto gap-8 px-4 py-12'):
+        # Hero section
+        with ui.column().classes('w-full items-center text-center gap-4'):
+            ui.icon('psychology', size='80px').classes('text-blue-600')
+            ui.label('Draft Daemon').classes('text-5xl font-bold text-gray-800')
+            ui.label('Your AI-powered writing assistant for technical specifications').classes('text-xl text-gray-600')
+        
+        ui.separator()
+        
+        # Feature cards
+        with ui.row().classes('w-full gap-6 justify-center'):
+            # Spec Interviewer Card
+            with ui.card().classes('w-80 hover:shadow-xl transition-shadow cursor-pointer') \
+                .on('click', lambda: ui.navigate.to('/kickoff')):
+                with ui.card_section().classes('bg-blue-50'):
+                    ui.icon('chat', size='48px').classes('text-blue-600')
+                with ui.card_section():
+                    ui.label('Spec Interviewer').classes('text-lg font-bold text-gray-800')
+                    ui.label('Chat with the Editorial Architect to define your project specifications through guided conversation.').classes('text-sm text-gray-600 mt-2')
+                    ui.button('Start Chatting', icon='arrow_forward') \
+                        .props('color=primary').classes('mt-4')
+            
+            # Editor Card
+            with ui.card().classes('w-80 hover:shadow-xl transition-shadow cursor-pointer') \
+                .on('click', lambda: ui.navigate.to('/editor')):
+                with ui.card_section().classes('bg-green-50'):
+                    ui.icon('edit', size='48px').classes('text-green-600')
+                with ui.card_section():
+                    ui.label('Editor').classes('text-lg font-bold text-gray-800')
+                    ui.label('Review and refine AI-generated specs. Edit side-by-side with SFT logging for continuous improvement.').classes('text-sm text-gray-600 mt-2')
+                    ui.button('Open Editor', icon='arrow_forward') \
+                        .props('color=positive').classes('mt-4')
+        
+        ui.separator()
+        
+        # How it works
+        with ui.column().classes('w-full gap-4'):
+            ui.label('How It Works').classes('text-2xl font-bold text-gray-800')
+            
+            steps = [
+                ('1', 'chat', 'Chat with AI', 'Answer questions about your project idea'),
+                ('2', 'auto_awesome', 'Generate Spec', 'AI creates a structured specification'),
+                ('3', 'edit', 'Refine', 'Edit and improve the generated spec'),
+                ('4', 'save', 'Save & Learn', 'Changes logged for continuous improvement'),
+            ]
+            
+            with ui.row().classes('w-full gap-4 justify-center'):
+                for num, icon, title, desc in steps:
+                    with ui.column().classes('items-center gap-2 w-48'):
+                        with ui.element('div').classes('w-12 h-12 rounded-full bg-blue-600 text-white flex items-center justify-center text-xl font-bold'):
+                            ui.label(num)
+                        ui.icon(icon, size='32px').classes('text-blue-600')
+                        ui.label(title).classes('font-bold text-gray-800')
+                        ui.label(desc).classes('text-xs text-gray-600 text-center')
+    
+    add_footer()
+
+
+@ui.page('/kickoff')
+def kickoff_page():
+    """Spec Interviewer with Pocket Flow (Async)."""
+    add_header('/kickoff')
+    
+    # Shared store for Pocket Flow
+    shared = {
+        "system_prompt": EDITORIAL_ARCHITECT_SYSTEM_PROMPT,
+        "chat_history": [],
+        "messages": [],
+        "user_input": None,
+        "llm_response": None,
+        "spec_complete": False,
+        "final_spec": None,
+        "project_name": None,
+        "spec_file_path": None,
+    }
+    
+    flow_running = False
+    
+    # Create LLM client once
+    llm_client = LLMClient(
+        base_url="http://localhost:11434/v1",
+        api_key="ollama",
+        model="gemma3-12b-32k:latest"
+    )
+    
+    async def send():
+        nonlocal flow_running
+        if flow_running:
+            return
+        
+        question = text.value
+        if not question:
+            return
+        
+        text.value = ''
+        
+        # Add user message to UI
+        with message_container:
+            ui.chat_message(text=question, name='You', sent=True)
+            response_message = ui.chat_message(name='Bot', sent=False)
+            spinner = ui.spinner(type='dots')
+        
+        flow_running = True
+        
+        try:
+            # Set user input for Pocket Flow
+            shared["user_input"] = question
+            
+            # Create flow and inject LLM client
+            flow = create_spec_interviewer_flow()
+            
+            # Inject LLM client into LLMEvaluateNode
+            chat_node = flow.start_node
+            llm_node = chat_node.successors.get("evaluate")
+            if isinstance(llm_node, LLMEvaluateNode):
+                llm_node.set_llm_client(llm_client)
+            
+            # Run async flow
+            await flow.run_async(shared)
+            
+            # Get response from shared store
+            response = shared.get("llm_response", "No response")
+            
+            # Update UI
+            with response_message.clear():
+                ui.label(response)
+            
+            message_container.remove(spinner)
+            
+            # Handle spec completion
+            if shared.get("spec_complete"):
+                spec_content = shared.get("final_spec", "")
+                project_name = shared.get("project_name", "")
+                spec_path = shared.get("spec_file_path", "")
+                
+                app_state["current_spec"] = spec_content
+                app_state["current_project"] = project_name
+                app_state["current_spec_path"] = spec_path
+                
+                ui.notify(f'Spec complete: {project_name}', type='positive',
+                         caption=f'Saved to: {spec_path}')
+                
+                # Show completion dialog
+                with ui.dialog() as dialog, ui.card().classes('w-96'):
+                    ui.label('✓ Specification Complete!').classes('text-h6 text-green-600')
+                    ui.label(f'Project: {project_name}').classes('text-body1')
+                    if spec_path:
+                        ui.label(f'Saved to: {spec_path}').classes('text-sm text-gray-500')
+                    with ui.row().classes('gap-2 mt-4'):
+                        ui.button('Open in Editor', 
+                                 on_click=lambda: [ui.navigate.to('/editor'), dialog.close()]
+                                 ).props('color=primary')
+                        ui.button('Continue', on_click=dialog.close).props('flat')
+                dialog.open()
+            
+        except Exception as e:
+            ui.notify(f'Error: {str(e)}', type='negative')
+            with response_message.clear():
+                ui.label(f'Error: {str(e)}')
+            message_container.remove(spinner)
+        finally:
+            flow_running = False
+    
+    # Main content area
+    with ui.column().classes('w-full max-w-4xl mx-auto gap-4 px-4 py-6 flex-grow'):
+        # Header card
+        with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50 border-l-4 border-blue-500'):
+            with ui.row().classes('items-center gap-3'):
+                ui.icon('psychology', size='32px').classes('text-blue-600')
+                with ui.column():
+                    ui.label('Spec Interviewer').classes('text-lg font-bold text-gray-800')
+                    ui.label('Chat with the Editorial Architect to define your project spec').classes('text-sm text-gray-600')
+        
+        # Chat messages area
+        message_container = ui.column().classes('w-full h-[500px] overflow-y-auto border rounded-lg p-4 bg-gray-50')
+        
+        # Initial greeting
+        with message_container:
+            ui.chat_message(
+                text="Hello! I'm the Editorial Architect. Tell me about your project idea.",
+                name='Bot',
+                sent=False
+            )
+        
+        # Input area
+        with ui.card().classes('w-full'):
+            with ui.row().classes('w-full items-center gap-2'):
+                text = ui.input(placeholder='Describe your project idea...') \
+                    .props('rounded outlined dense') \
+                    .classes('flex-grow') \
+                    .on('keydown.enter', send)
+                
+                ui.button(icon='send', on_click=send) \
+                    .props('round color=primary')
+    
+    add_footer()
+
+
+@ui.page('/editor')
+def editor_page():
+    """Editor pane page with Research Engine integration."""
+    add_header('/editor')
+    
+    # Research state
+    research_running = False
+    
+    with ui.column().classes('w-full max-w-6xl mx-auto gap-4 px-4 py-6 flex-grow'):
+        # Header card with Research button
+        with ui.card().classes('w-full bg-gradient-to-r from-green-50 to-emerald-50 border-l-4 border-green-500'):
+            with ui.row().classes('items-center justify-between w-full'):
+                with ui.row().classes('items-center gap-3'):
+                    ui.icon('edit', size='32px').classes('text-green-600')
+                    with ui.column():
+                        ui.label('Editor').classes('text-lg font-bold text-gray-800')
+                        ui.label('Review and refine your AI-generated specification').classes('text-sm text-gray-600')
+                
+                # Research button
+                research_button = ui.button(
+                    'Run Research',
+                    icon='search',
+                    on_click=lambda: run_research()
+                ).props('color=primary outline')
+                research_button.tooltip('Research this topic using web search and AI distillation')
+        
+        # Research status
+        research_status = ui.label('').classes('text-sm text-blue-600 italic')
+        
+        # Editor component
+        editor = EditorPane()
+        editor.classes('w-full')
+        
+        # Load existing spec if available
+        if app_state.get("current_spec"):
+            editor.set_ai_content(app_state.get("current_spec", ""))
+        
+        async def run_research():
+            """Run the Research Engine flow."""
+            nonlocal research_running
+            
+            if research_running:
+                ui.notify('Research is already running!', type='warning')
+                return
+            
+            spec_content = app_state.get("current_spec", "")
+            if not spec_content:
+                ui.notify('No spec loaded. Please generate a spec first.', type='warning')
+                return
+            
+            research_running = True
+            research_button.props('disable')
+            research_status.text = '🔍 Starting research engine...'
+            
+            try:
+                # Import research flow
+                from workflows.research_flow import create_research_flow
+                from workflows.research import QueryExtractionNode, SearchAndScrapeNode, DistillationNode
+                from utils.llm_client import LLMClient
+                
+                # Initialize shared store for research
+                research_shared = {
+                    "spec_content": spec_content,
+                    "project_name": app_state.get("current_project", "Research"),
+                    "spec_file_path": app_state.get("current_spec_path", ""),
+                    "search_queries": [],
+                    "scraped_content": [],
+                    "distilled_content": "",
+                    "research_file_path": "",
+                }
+                
+                # Create flow
+                flow = create_research_flow()
+                
+                # Inject LLM client into nodes
+                llm_client = LLMClient(
+                    base_url="http://localhost:11434/v1",
+                    api_key="ollama",
+                    model="gemma3-12b-32k:latest"
+                )
+                
+                chat_node = flow.start_node
+                if isinstance(chat_node, QueryExtractionNode):
+                    chat_node.set_llm_client(llm_client)
+                    research_status.text = '📝 Extracting search queries from spec...'
+                
+                llm_node = chat_node.successors.get("search")
+                if isinstance(llm_node, SearchAndScrapeNode):
+                    research_status.text = '🔍 Searching web and scraping content (parallel)...'
+                
+                distill_node = llm_node.successors.get("distill")
+                if isinstance(distill_node, DistillationNode):
+                    distill_node.set_llm_client(llm_client)
+                
+                # Run the flow
+                await flow.run_async(research_shared)
+                
+                research_status.text = '✓ Research complete!'
+                research_path = research_shared.get("research_file_path", "")
+                
+                ui.notify(
+                    'Research engine complete!',
+                    type='positive',
+                    caption=f'Saved to: {research_path}'
+                )
+                
+                # Show results dialog
+                with ui.dialog() as dialog, ui.card().classes('w-[600px]'):
+                    ui.label('✓ Research Complete!').classes('text-h6 text-green-600')
+                    
+                    with ui.scroll_area().classes('h-64 mt-4'):
+                        ui.markdown(research_shared.get("distilled_content", "No content"))
+                    
+                    with ui.row().classes('gap-2 mt-4'):
+                        ui.button('Close', on_click=dialog.close).props('color=primary')
+                
+                dialog.open()
+                
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                ui.notify(f'Research error: {str(e)}', type='negative', timeout=10000)
+                research_status.text = f'✗ Error: {str(e)}'
+            finally:
+                research_running = False
+                research_button.props('remove-disable')
+
+    add_footer()
+
+
+if __name__ in {"__main__", "__mp_main__"}:
+    ui.run(
+        title='Draft Daemon',
+        host='localhost',
+        port=8080,
+        storage_secret='draft-daemon-secret-key',
+        dark=False,
+    )
+
+
+
+================================================================
+File: ./tests/test_app.py
+================================================================
+"""
+Tests for Draft Daemon application.
+
+Run with: .\\.venv\\Scripts\\python.exe -m pytest tests/ -v
+"""
+
+import sys
+import os
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def test_main_import():
+    """Test that main.py imports without errors."""
+    try:
+        import main
+        print("[PASS] main.py imports successfully")
+        return True
+    except Exception as e:
+        print(f"[FAIL] main.py import failed: {e}")
+        return False
+
+
+def test_llm_client_import():
+    """Test that LLMClient imports correctly."""
+    try:
+        from utils.llm_client import LLMClient
+        print("[PASS] LLMClient imports successfully")
+        return True
+    except Exception as e:
+        print(f"[FAIL] LLMClient import failed: {e}")
+        return False
+
+
+def test_llm_client_initialization():
+    """Test that LLMClient initializes with correct Ollama settings."""
+    from utils.llm_client import LLMClient
+    
+    client = LLMClient(
+        base_url="http://localhost:11434/v1",
+        api_key="ollama",
+        model="gemma3-12b-32k:latest"
+    )
+    
+    assert client.base_url == "http://localhost:11434/v1", f"Expected Ollama URL, got {client.base_url}"
+    assert client.api_key == "ollama", f"Expected 'ollama' API key, got {client.api_key}"
+    assert client.model == "gemma3-12b-32k:latest", f"Expected gemma3 model, got {client.model}"
+    
+    print("[PASS] LLMClient initializes with correct Ollama settings")
+    return True
+
+
+def test_workflows_import():
+    """Test that workflow nodes and flow import correctly."""
+    try:
+        from workflows.nodes import ChatInputNode, LLMEvaluateNode, GenerateSpecNode
+        from workflows.flow import create_spec_interviewer_flow
+        print("[PASS] Workflow nodes and flow import successfully")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Workflow import failed: {e}")
+        return False
+
+
+def test_flow_creation():
+    """Test that the spec interviewer flow can be created."""
+    from workflows.flow import create_spec_interviewer_flow
+    from workflows.nodes import ChatInputNode, LLMEvaluateNode, GenerateSpecNode
+    
+    flow = create_spec_interviewer_flow()
+    
+    assert flow is not None, "Flow should not be None"
+    assert isinstance(flow.start_node, ChatInputNode), f"Expected ChatInputNode, got {type(flow.start_node)}"
+    
+    # Check node connections - ChatInputNode uses 'default' action (via >>)
+    chat_node = flow.start_node
+    assert "default" in chat_node.successors, "ChatInputNode should have 'default' successor"
+    
+    llm_node = chat_node.successors.get("default")
+    assert isinstance(llm_node, LLMEvaluateNode), f"Expected LLMEvaluateNode, got {type(llm_node)}"
+    
+    # LLMEvaluateNode should have both 'evaluate' (loop back) and 'generate' successors
+    assert "evaluate" in llm_node.successors, "LLMEvaluateNode should have 'evaluate' successor"
+    assert "generate" in llm_node.successors, "LLMEvaluateNode should have 'generate' successor"
+    
+    gen_node = llm_node.successors.get("generate")
+    assert isinstance(gen_node, GenerateSpecNode), f"Expected GenerateSpecNode, got {type(gen_node)}"
+    
+    print("[PASS] Spec interviewer flow creates correctly with proper node connections")
+    return True
+
+
+def test_components_import():
+    """Test that components import correctly."""
+    try:
+        from components.editor_pane import EditorPane
+        print("[PASS] EditorPane imports successfully")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Component import failed: {e}")
+        return False
+
+
+def test_parser_utilities():
+    """Test the markdown parser utilities."""
+    from utils.parser import extract_markdown_spec, extract_project_name, is_spec_complete
+    
+    # Test extract_markdown_spec with triple backticks
+    test1 = "```markdown\n# Test Project\nContent\n```"
+    result1 = extract_markdown_spec(test1)
+    assert "# Test Project" in result1, f"Expected markdown content, got {result1}"
+    
+    # Test extract_markdown_spec with quadruple backticks
+    test2 = "````markdown\n# Another Project\nContent\n````"
+    result2 = extract_markdown_spec(test2)
+    assert "# Another Project" in result2, f"Expected markdown content, got {result2}"
+    
+    # Test is_spec_complete
+    assert is_spec_complete("```markdown\n# Spec\n```") == True, "Should detect spec completion"
+    assert is_spec_complete("Let me ask a question") == False, "Should not detect completion"
+    
+    print("[PASS] Parser utilities work correctly")
+    return True
+
+
+def test_file_system_writer():
+    """Test the FileSystemWriter utility."""
+    from utils.file_system_writer import FileSystemWriter
+    import tempfile
+    import shutil
+    
+    # Create temp directory for testing
+    temp_dir = tempfile.mkdtemp()
+    
+    try:
+        writer = FileSystemWriter(base_dir=temp_dir)
+        
+        # Test directory creation
+        test_spec = "# Test Project\n\nThis is a test."
+        project_dir, spec_path = writer.write_spec(test_spec, "Test_Project")
+        
+        assert project_dir.exists(), f"Project directory should exist: {project_dir}"
+        assert spec_path.exists(), f"Spec file should exist: {spec_path}"
+        assert spec_path.name == "01_Spec.md", f"Expected 01_Spec.md, got {spec_path.name}"
+        
+        # Verify content
+        content = spec_path.read_text()
+        assert "# Test Project" in content, "Spec content should match"
+        
+        print("[PASS] FileSystemWriter works correctly")
+        return True
+    finally:
+        # Cleanup
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_shared_store_structure():
+    """Test that the shared store has the correct structure."""
+    from main import EDITORIAL_ARCHITECT_SYSTEM_PROMPT
+    
+    shared = {
+        "system_prompt": EDITORIAL_ARCHITECT_SYSTEM_PROMPT,
+        "chat_history": [],
+        "messages": [],
+        "user_input": None,
+        "llm_response": None,
+        "spec_complete": False,
+        "final_spec": None,
+        "project_name": None,
+        "spec_file_path": None,
+    }
+    
+    # Verify all required keys exist
+    required_keys = [
+        "system_prompt", "chat_history", "messages", "user_input",
+        "llm_response", "spec_complete", "final_spec", "project_name", "spec_file_path"
+    ]
+    
+    for key in required_keys:
+        assert key in shared, f"Missing required key: {key}"
+    
+    # Verify system prompt is set
+    assert "Editorial Architect" in shared["system_prompt"], "System prompt should be set"
+    
+    print("[PASS] Shared store structure is correct")
+    return True
+
+
+def test_input_field_binding():
+    """Test that input field binding works (the fix for the TypeError)."""
+    # This test verifies the fix for: TypeError: 'Input' object is not callable
+    # The issue was using @input_field.on('change') decorator syntax
+    # The fix uses input_field.on('change', callback) function call syntax
+    
+    from nicegui import ui
+    
+    # Create an input and button (won't render, just test the binding)
+    input_field = ui.input(placeholder='Test...')
+    button = ui.button('Send').disable()
+    
+    # This should NOT raise TypeError
+    try:
+        input_field.on('change', lambda e: None)
+        input_field.on('input', lambda e: None)
+        print("[PASS] Input field event binding works correctly")
+        return True
+    except TypeError as e:
+        print(f"[FAIL] Input field binding raised TypeError: {e}")
+        return False
+    except Exception as e:
+        print(f"[FAIL] Input field binding raised exception: {e}")
+        return False
+
+
+def run_all_tests():
+    """Run all tests and report results."""
+    print("\n" + "="*60)
+    print("Running Draft Daemon Tests")
+    print("="*60 + "\n")
+    
+    tests = [
+        test_main_import,
+        test_llm_client_import,
+        test_llm_client_initialization,
+        test_workflows_import,
+        test_flow_creation,
+        test_components_import,
+        test_parser_utilities,
+        test_file_system_writer,
+        test_shared_store_structure,
+        test_input_field_binding,
+    ]
+    
+    passed = 0
+    failed = 0
+    
+    for test in tests:
+        try:
+            if test():
+                passed += 1
+            else:
+                failed += 1
+        except Exception as e:
+            print(f"[FAIL] {test.__name__} raised exception: {e}")
+            failed += 1
+    
+    print("\n" + "="*60)
+    print(f"Results: {passed} passed, {failed} failed")
+    print("="*60 + "\n")
+    
+    return failed == 0
+
+
+if __name__ == "__main__":
+    success = run_all_tests()
+    sys.exit(0 if success else 1)
+
+
+
+================================================================
+File: ./utils/file_system_writer.py
+================================================================
+"""
+FileSystemWriter utility for creating project directories and writing spec files.
+"""
+
+import os
+import json
+from datetime import datetime
+from pathlib import Path
+
+from utils.parser import extract_project_name
+
+
+class FileSystemWriter:
+    """
+    Writes OpenSpec specifications to the file system.
+    
+    Creates directory structure:
+    Writing_System_Dev/Projects/<project_name>/01_Spec.md
+    
+    If project_name is not provided or invalid, uses timestamp fallback.
+    """
+    
+    def __init__(self, base_dir=None):
+        """
+        Initialize the FileSystemWriter.
+        
+        Args:
+            base_dir: Base directory for projects (default: current dir/Writing_System_Dev/Projects)
+        """
+        if base_dir:
+            self.base_dir = Path(base_dir)
+        else:
+            self.base_dir = Path.cwd() / "Writing_System_Dev" / "Projects"
+    
+    def ensure_base_directory(self) -> Path:
+        """
+        Ensure the base projects directory exists.
+        
+        Returns:
+            Path: The base directory path
+        """
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        return self.base_dir
+    
+    def create_project_directory(self, project_name: str = None, spec_content: str = None) -> Path:
+        """
+        Create a project directory with timestamp fallback.
+        
+        Args:
+            project_name: Optional project name (if None, extracts from spec_content or uses timestamp)
+            spec_content: Optional spec content to extract project name from
+            
+        Returns:
+            Path: The created project directory path
+        """
+        # Ensure base directory exists
+        self.ensure_base_directory()
+        
+        # Determine project name
+        if project_name:
+            safe_name = self._sanitize_folder_name(project_name)
+        elif spec_content:
+            extracted_name = extract_project_name(spec_content)
+            safe_name = self._sanitize_folder_name(extracted_name)
+        else:
+            # Timestamp fallback: YYYYMMDD_HHMMSS
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_name = f"Project_{timestamp}"
+        
+        # Handle duplicate directory names
+        project_dir = self.base_dir / safe_name
+        counter = 1
+        while project_dir.exists():
+            project_dir = self.base_dir / f"{safe_name}_v{counter}"
+            counter += 1
+        
+        # Create the directory
+        project_dir.mkdir(parents=True, exist_ok=True)
+        
+        return project_dir
+    
+    def write_spec(self, spec_content: str, project_name: str = None) -> tuple:
+        """
+        Write the specification to 01_Spec.md in a project directory.
+        
+        Args:
+            spec_content: The markdown spec content to write
+            project_name: Optional project name
+            
+        Returns:
+            tuple: (project_directory_path, spec_file_path)
+        """
+        # Create project directory
+        project_dir = self.create_project_directory(project_name, spec_content)
+        
+        # Write spec file
+        spec_path = project_dir / "01_Spec.md"
+        spec_path.write_text(spec_content, encoding="utf-8")
+        
+        return (project_dir, spec_path)
+    
+    def _sanitize_folder_name(self, name: str) -> str:
+        """
+        Sanitize a string for use as a folder name.
+        
+        - Replace spaces with underscores
+        - Remove invalid characters
+        - Limit length
+        
+        Args:
+            name: The original name
+            
+        Returns:
+            str: Sanitized folder-safe string
+        """
+        # Replace spaces with underscores
+        sanitized = name.replace(" ", "_")
+        
+        # Remove invalid folder name characters
+        sanitized = ''.join(c for c in sanitized if c not in '<>:"/\\|?*')
+        
+        # Remove leading/trailing dots and spaces
+        sanitized = sanitized.strip(". ")
+        
+        # Limit length
+        if len(sanitized) > 50:
+            sanitized = sanitized[:50]
+        
+        return sanitized or f"Project_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+
+# Test function
+def _test_writer():
+    """Test the FileSystemWriter."""
+    writer = FileSystemWriter()
+    
+    test_spec = """# Test Project Specification
+
+## Overview
+This is a test specification.
+
+## Requirements
+- Requirement 1
+- Requirement 2
+"""
+    
+    project_dir, spec_path = writer.write_spec(test_spec, "Test_Project")
+    
+    print(f"Created directory: {project_dir}")
+    print(f"Wrote spec: {spec_path}")
+    print(f"Spec exists: {spec_path.exists()}")
+    
+    # Clean up test directory
+    import shutil
+    shutil.rmtree(project_dir)
+    print("Test directory cleaned up.")
+
+
+if __name__ == "__main__":
+    _test_writer()
+
+
+
+================================================================
+File: ./utils/llm_client.py
+================================================================
+"""
+LLMClient for communicating with Ollama server.
+
+This client wraps the OpenAI API to communicate with Ollama.
+Ollama provides an OpenAI-compatible API endpoint.
+"""
+
+import os
+from openai import AsyncOpenAI
+
+
+class LLMClient:
+    """
+    Async LLM client for Ollama server.
+    
+    Usage:
+        client = LLMClient()
+        response = await client.chat_async([{"role": "user", "content": "Hello"}])
+    """
+    
+    def __init__(self, base_url=None, api_key=None, model=None):
+        """
+        Initialize the LLM client.
+        
+        Args:
+            base_url: Ollama base URL (default: http://localhost:11434/v1)
+            api_key: API key (default: 'ollama' - Ollama doesn't require auth)
+            model: Model name (default: gemma3-12b-32k:latest)
+        """
+        self.base_url = base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+        self.api_key = api_key or os.getenv("OLLAMA_API_KEY", "ollama")
+        self.model = model or os.getenv("OLLAMA_MODEL", "gemma3-12b-32k:latest")
+        
+        # Initialize async OpenAI client configured for Ollama
+        self._client = AsyncOpenAI(
+            base_url=self.base_url,
+            api_key=self.api_key
+        )
+    
+    async def chat_async(self, messages):
+        """
+        Send a chat completion request to Ollama.
+        
+        Args:
+            messages: List of message dicts with 'role' and 'content' keys
+            
+        Returns:
+            str: The assistant's response text
+        """
+        # DEBUG: Log incoming request
+        print("\n" + "="*60)
+        print("[LLMClient] Sending request to Ollama:")
+        print(f"  Base URL: {self.base_url}")
+        print(f"  Model: {self.model}")
+        print(f"  API Key: {self.api_key}")
+        print(f"  Messages count: {len(messages)}")
+        for i, msg in enumerate(messages):
+            preview = msg.get("content", "")[:100] + "..." if len(msg.get("content", "")) > 100 else msg.get("content", "")
+            print(f"    [{i}] {msg.get('role')}: {preview}")
+        print("="*60)
+        
+        try:
+            response = await self._client.chat.completions.create(
+                model=self.model,
+                messages=messages
+            )
+            
+            response_text = response.choices[0].message.content
+            
+            # DEBUG: Log outgoing response
+            print("\n" + "="*60)
+            print("[LLMClient] Received response from Ollama:")
+            preview = response_text[:100] + "..." if len(response_text) > 100 else response_text
+            print(f"  Response preview: {preview}")
+            print(f"  Response length: {len(response_text)} chars")
+            print("="*60 + "\n")
+            
+            return response_text
+            
+        except Exception as e:
+            print("\n" + "="*60)
+            print(f"[LLMClient] ERROR: {type(e).__name__}: {str(e)}")
+            print("="*60 + "\n")
+            raise
+    
+    def chat(self, messages):
+        """
+        Synchronous wrapper for chat_async.
+        Uses run_io_bound for NiceGUI compatibility.
+        """
+        import asyncio
+        from nicegui import run
+        
+        # Use NiceGUI's IO-bound runner for async LLM calls
+        return run.io_bound(lambda: asyncio.run(self.chat_async(messages)))
+
+
+# Test function
+async def _test_client():
+    """Test the LLM client with a simple prompt."""
+    client = LLMClient()
+    
+    test_messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Hello, how are you?"}
+    ]
+    
+    try:
+        response = await client.chat_async(test_messages)
+        print(f"Response: {response}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(_test_client())
+
+
+
+================================================================
+File: ./utils/parser.py
+================================================================
+"""
+Parser utilities for extracting structured content from LLM responses.
+"""
+
+import re
+
+
+def extract_markdown_spec(text: str) -> str:
+    """
+    Extract markdown content from LLM response.
+    
+    Handles various backtick combinations:
+    - ```markdown ... ```
+    - ````markdown ... ````
+    - ``` ... ```
+    - Even nested or malformed backticks
+    
+    Args:
+        text: The LLM response text
+        
+    Returns:
+        str: The extracted markdown content (without the code block markers)
+    """
+    if not text:
+        return ""
+    
+    # Pattern 1: Try ```markdown or ````markdown (with language specifier)
+    # Matches 3 or more backticks, optional language, content, closing backticks
+    pattern_with_lang = r"`{3,}(markdown)?\s*(.*?)\s*`{3,}"
+    match = re.search(pattern_with_lang, text, re.DOTALL | re.IGNORECASE)
+    
+    if match:
+        return match.group(2).strip()
+    
+    # Pattern 2: Try generic code blocks without language specifier
+    pattern_generic = r"`{3,}\s*(.*?)\s*`{3,}"
+    match = re.search(pattern_generic, text, re.DOTALL)
+    
+    if match:
+        return match.group(1).strip()
+    
+    # Pattern 3: Look for content between any backtick sequences
+    # This handles edge cases with varying backtick counts
+    backtick_pattern = r"(`{3,})\s*(.*?)\s*\1"
+    match = re.search(backtick_pattern, text, re.DOTALL)
+    
+    if match:
+        return match.group(2).strip()
+    
+    # Fallback: If no code blocks found, return the entire text
+    # This handles cases where LLM outputs raw markdown without wrapping
+    return text.strip()
+
+
+def extract_project_name(spec_content: str) -> str:
+    """
+    Extract project name from spec content.
+    
+    Looks for:
+    1. First H1 header (# Project Name)
+    2. First H2 header (## Project Name)
+    3. Falls back to "Untitled_Project"
+    
+    Args:
+        spec_content: The markdown spec content
+        
+    Returns:
+        str: Sanitized project name suitable for filenames
+    """
+    if not spec_content:
+        return "Untitled_Project"
+    
+    # Try H1 header first
+    h1_pattern = r"^#\s+(.+?)\s*$"
+    match = re.search(h1_pattern, spec_content, re.MULTILINE)
+    
+    if match:
+        return _sanitize_filename(match.group(1))
+    
+    # Try H2 header
+    h2_pattern = r"^##\s+(.+?)\s*$"
+    match = re.search(h2_pattern, spec_content, re.MULTILINE)
+    
+    if match:
+        return _sanitize_filename(match.group(1))
+    
+    return "Untitled_Project"
+
+
+def _sanitize_filename(name: str) -> str:
+    """
+    Sanitize a string for use as a filename.
+    
+    - Replace spaces with underscores
+    - Remove or replace invalid characters
+    - Limit length
+    
+    Args:
+        name: The original name
+        
+    Returns:
+        str: Sanitized filename-safe string
+    """
+    # Replace spaces with underscores
+    sanitized = name.replace(" ", "_")
+    
+    # Remove invalid filename characters
+    sanitized = re.sub(r'[<>:"/\\|?*]', "", sanitized)
+    
+    # Remove leading/trailing dots and spaces
+    sanitized = sanitized.strip(". ")
+    
+    # Limit length (Windows MAX_PATH is 260, but we want to be safe)
+    if len(sanitized) > 50:
+        sanitized = sanitized[:50]
+    
+    return sanitized or "Untitled_Project"
+
+
+def is_spec_complete(text: str) -> bool:
+    """
+    Check if the LLM response indicates spec completion.
+    
+    Looks for:
+    - Markdown code blocks (indicates final spec output)
+    - Completion markers
+    - Resolution keywords
+    
+    Args:
+        text: The LLM response text
+        
+    Returns:
+        bool: True if spec appears complete
+    """
+    if not text:
+        return False
+    
+    text_lower = text.lower()
+    
+    # Check for markdown code blocks
+    if "```markdown" in text_lower or "````markdown" in text_lower:
+        return True
+    
+    # Check for explicit completion markers
+    completion_markers = [
+        "[spec_complete]",
+        "spec is complete",
+        "specification complete",
+        "here is your spec",
+        "here is the specification",
+        "final specification",
+    ]
+    
+    if any(marker in text_lower for marker in completion_markers):
+        return True
+    
+    # Check for resolution commands
+    resolution_keywords = [
+        "resolve",
+        "generate the spec",
+        "generate spec",
+        "output the spec",
+    ]
+    
+    if any(keyword in text_lower for keyword in resolution_keywords):
+        return True
+    
+    return False
+
+
+# Test function
+def _test_parser():
+    """Test the parser with various inputs."""
+    
+    # Test 1: Standard markdown block
+    test1 = """Here's your spec:
+
+```markdown
+# My Project
+## Overview
+This is a test project.
+```
+
+Hope this helps!"""
+    
+    result1 = extract_markdown_spec(test1)
+    print(f"Test 1: {result1}")
+    assert "# My Project" in result1
+    
+    # Test 2: Quadruple backticks
+    test2 = """````markdown
+# Another Project
+Content here.
+````"""
+    
+    result2 = extract_markdown_spec(test2)
+    print(f"Test 2: {result2}")
+    assert "# Another Project" in result2
+    
+    # Test 3: No code blocks (raw markdown)
+    test3 = "# Raw Project\nThis is raw markdown."
+    result3 = extract_markdown_spec(test3)
+    print(f"Test 3: {result3}")
+    assert "# Raw Project" in result3
+    
+    # Test 4: Spec completion detection
+    assert is_spec_complete("```markdown\n# Spec\n```") == True
+    assert is_spec_complete("The spec is complete.") == True
+    assert is_spec_complete("Let me ask another question.") == False
+    
+    print("All tests passed!")
+
+
+if __name__ == "__main__":
+    _test_parser()
+
+
+
+================================================================
+File: ./utils/scraper.py
+================================================================
+"""
+Web scraper utility with Tavily API support (default), Firecrawl, and BeautifulSoup fallback.
+
+Priority:
+1. Use Tavily content directly (if already fetched via search.py)
+2. Firecrawl API - for dedicated scraping
+3. BeautifulSoup + httpx - basic fallback
+
+Usage:
+    content = scrape_url("https://example.com")
+    
+Note: If you're using Tavily for search, the content is already included
+in the SearchResult objects from search.py - no need to scrape again!
+
+Environment Variables:
+    TAVILY_API_KEY: Your Tavily API key
+    FIRECRAWL_API_KEY: Your Firecrawl API key
+"""
+
+import os
+import httpx
+from typing import Optional, Dict, Any
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class ScrapedContent:
+    """Represents scraped content from a URL."""
+    
+    def __init__(self, url: str, title: str, content: str, success: bool = True, source: str = "scraped"):
+        self.url = url
+        self.title = title
+        self.content = content
+        self.success = success
+        self.source = source  # "tavily", "firecrawl", or "beautifulsoup"
+    
+    def to_dict(self) -> dict:
+        return {
+            "url": self.url,
+            "title": self.title,
+            "content": self.content,
+            "success": self.success,
+            "source": self.source
+        }
+
+
+def scrape_url(url: str, timeout: float = 10.0, use_tavily_cache: bool = True) -> ScrapedContent:
+    """
+    Scrape content from a URL.
+    
+    Priority:
+    1. If Tavily API key exists and use_tavily_cache=True, use Tavily's extract endpoint
+    2. Firecrawl API
+    3. BeautifulSoup fallback
+    
+    Args:
+        url: URL to scrape
+        timeout: Request timeout in seconds
+        use_tavily_cache: Try Tavily first if API key available
+    
+    Returns:
+        ScrapedContent object with title and content
+    """
+    # Try Tavily first (if enabled)
+    if use_tavily_cache:
+        tavily_api_key = os.getenv("TAVILY_API_KEY")
+        if tavily_api_key:
+            print(f"[SCRAPER] Using Tavily extract for: {url}")
+            result = _tavily_extract(url, timeout)
+            if result.success:
+                return result
+    
+    # Try Firecrawl
+    firecrawl_api_key = os.getenv("FIRECRAWL_API_KEY")
+    if firecrawl_api_key:
+        print(f"[SCRAPER] No Tavily, using Firecrawl for: {url}")
+        result = _firecrawl_scrape(url, timeout)
+        if result.success:
+            return result
+    
+    # Fallback to BeautifulSoup
+    print(f"[SCRAPER] No API keys, using BeautifulSoup fallback for: {url}")
+    return _beautifulsoup_scrape(url, timeout)
+
+
+def _tavily_extract(url: str, timeout: float) -> ScrapedContent:
+    """
+    Extract content from URL using Tavily's extract endpoint.
+    
+    Args:
+        url: URL to extract from
+        timeout: Request timeout
+    
+    Returns:
+        ScrapedContent object
+    """
+    endpoint = "https://api.tavily.com/extract"
+    
+    headers = {
+        "Content-Type": "application/json",
+    }
+    
+    payload = {
+        "api_key": os.getenv("TAVILY_API_KEY"),
+        "urls": [url],
+        "include_raw_content": True
+    }
+    
+    try:
+        with httpx.Client() as client:
+            response = client.post(endpoint, headers=headers, json=payload, timeout=timeout)
+            response.raise_for_status()
+            data = response.json()
+        
+        results = data.get("results", [])
+        if results:
+            result = results[0]
+            return ScrapedContent(
+                url=url,
+                title=result.get("title", url),
+                content=result.get("raw_content", result.get("content", "")),
+                success=True,
+                source="tavily"
+            )
+        else:
+            return ScrapedContent(
+                url=url,
+                title=url,
+                content="Error: Tavily returned no results",
+                success=False,
+                source="tavily"
+            )
+            
+    except Exception as e:
+        print(f"[SCRAPER] Tavily extract error: {e}")
+        return ScrapedContent(
+            url=url,
+            title=url,
+            content=f"Error: {str(e)}",
+            success=False,
+            source="tavily"
+        )
+
+
+def _firecrawl_scrape(url: str, timeout: float) -> ScrapedContent:
+    """
+    Scrape using Firecrawl API (returns markdown).
+    
+    Args:
+        url: URL to scrape
+        timeout: Request timeout
+    
+    Returns:
+        ScrapedContent object
+    """
+    base_url = os.getenv("FIRECRAWL_BASE_URL", "https://api.firecrawl.dev")
+    endpoint = f"{base_url}/v1/scrape"
+    
+    firecrawl_api_key = os.getenv("FIRECRAWL_API_KEY")
+    
+    headers = {
+        "Authorization": f"Bearer {firecrawl_api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "url": url,
+        "formats": ["markdown"],
+        "onlyMainContent": True,
+        "waitFor": 0
+    }
+    
+    try:
+        with httpx.Client() as client:
+            response = client.post(endpoint, headers=headers, json=payload, timeout=timeout)
+            response.raise_for_status()
+            data = response.json()
+        
+        if data.get("success"):
+            markdown_content = data.get("data", {}).get("markdown", "")
+            title = data.get("data", {}).get("metadata", {}).get("title", "")
+            
+            print(f"[SCRAPER] Firecrawl returned {len(markdown_content)} chars for: {url}")
+            return ScrapedContent(
+                url=url,
+                title=title or url,
+                content=markdown_content,
+                success=True,
+                source="firecrawl"
+            )
+        else:
+            error_msg = data.get("error", "Unknown error")
+            print(f"[SCRAPER] Firecrawl error: {error_msg}")
+            return ScrapedContent(
+                url=url,
+                title=url,
+                content=f"Error: {error_msg}",
+                success=False,
+                source="firecrawl"
+            )
+            
+    except Exception as e:
+        print(f"[SCRAPER] Firecrawl error: {e}")
+        return ScrapedContent(
+            url=url,
+            title=url,
+            content=f"Error: {str(e)}",
+            success=False,
+            source="firecrawl"
+        )
+
+
+def _beautifulsoup_scrape(url: str, timeout: float) -> ScrapedContent:
+    """
+    Scrape using httpx + BeautifulSoup (returns plain text).
+    
+    Args:
+        url: URL to scrape
+        timeout: Request timeout
+    
+    Returns:
+        ScrapedContent object
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
+    try:
+        with httpx.Client() as client:
+            response = client.get(url, headers=headers, timeout=timeout, follow_redirects=True)
+            response.raise_for_status()
+            html = response.text
+        
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # Remove script and style elements
+        for script in soup(['script', 'style', 'nav', 'header', 'footer']):
+            script.decompose()
+        
+        # Extract title
+        title = soup.title.string if soup.title else url
+        
+        # Extract main content
+        main_content = None
+        for tag_name in ['article', 'main', 'content', 'post', 'entry']:
+            main_content = soup.find(tag_name)
+            if main_content:
+                break
+        
+        if not main_content:
+            main_content = soup.body if soup.body else soup
+        
+        # Extract and clean text
+        text_content = main_content.get_text(separator='\n', strip=True)
+        lines = [line.strip() for line in text_content.splitlines() if line.strip()]
+        cleaned_content = '\n'.join(lines)
+        
+        print(f"[SCRAPER] BeautifulSoup returned {len(cleaned_content)} chars for: {url}")
+        return ScrapedContent(
+            url=url,
+            title=title.strip() if title else url,
+            content=cleaned_content,
+            success=True,
+            source="beautifulsoup"
+        )
+        
+    except Exception as e:
+        print(f"[SCRAPER] Error scraping {url}: {e}")
+        return ScrapedContent(
+            url=url,
+            title=url,
+            content=f"Error: {str(e)}",
+            success=False,
+            source="beautifulsoup"
+        )
+
+
+# Test function
+def _test_scraper():
+    """Test the scraper function."""
+    print("="*60)
+    print("Testing scrape_url()")
+    print("="*60)
+    
+    test_urls = [
+        "https://example.com",
+    ]
+    
+    for url in test_urls:
+        print(f"\nScraping: {url}")
+        result = scrape_url(url)
+        
+        print(f"Title: {result.title}")
+        print(f"Success: {result.success}")
+        print(f"Source: {result.source}")
+        print(f"Content length: {len(result.content)} chars")
+        print(f"Preview: {result.content[:200]}...")
+    
+    print("\n" + "="*60)
+    print("Test complete!")
+    print("="*60)
+
+
+if __name__ == "__main__":
+    _test_scraper()
+
+
+
+================================================================
+File: ./utils/search.py
+================================================================
+"""
+Web search utility with Tavily API support (default) and fallbacks.
+
+Priority:
+1. Tavily API (default) - provides search + content extraction
+2. Brave Search API - search only
+3. Mock fallback - for testing without API keys
+
+Usage:
+    results = web_search("your query")
+    
+Environment Variables:
+    TAVILY_API_KEY: Your Tavily API key (default search engine)
+    BRAVE_API_KEY: Your Brave Search API key (fallback)
+"""
+
+import os
+import httpx
+from typing import List, Dict, Any, Optional
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class SearchResult:
+    """Represents a single search result."""
+    
+    def __init__(self, title: str, url: str, snippet: str, content: str = ""):
+        self.title = title
+        self.url = url
+        self.snippet = snippet
+        self.content = content  # Full page content (Tavily provides this)
+    
+    def to_dict(self) -> dict:
+        return {
+            "title": self.title,
+            "url": self.url,
+            "snippet": self.snippet,
+            "content": self.content
+        }
+
+
+def web_search(query: str, num_results: int = 5, include_content: bool = True) -> List[SearchResult]:
+    """
+    Search the web using Tavily API (default) with fallbacks.
+    
+    Args:
+        query: Search query string
+        num_results: Number of results to return (default: 5)
+        include_content: Whether to fetch full page content (Tavily only)
+    
+    Returns:
+        List of SearchResult objects
+    """
+    # Try Tavily first (default)
+    tavily_api_key = os.getenv("TAVILY_API_KEY")
+    
+    if tavily_api_key:
+        print(f"[SEARCH] Using Tavily API for: '{query}'")
+        return _tavily_search(query, num_results, include_content)
+    
+    # Fallback to Brave
+    brave_api_key = os.getenv("BRAVE_API_KEY")
+    
+    if brave_api_key:
+        print(f"[SEARCH] No TAVILY_API_KEY, using Brave Search API for: '{query}'")
+        return _brave_search(query, num_results)
+    
+    # Last resort: mock fallback
+    print(f"[SEARCH] No API keys set, using mock fallback for: '{query}'")
+    return _mock_search(query, num_results)
+
+
+def _tavily_search(query: str, num_results: int, include_content: bool) -> List[SearchResult]:
+    """
+    Perform search using Tavily API.
+    
+    Tavily provides both search results AND full page content in one call,
+    which is perfect for our research engine.
+    
+    Args:
+        query: Search query
+        num_results: Number of results
+        include_content: Fetch full page content
+    
+    Returns:
+        List of SearchResult objects
+    """
+    endpoint = "https://api.tavily.com/search"
+    
+    headers = {
+        "Content-Type": "application/json",
+    }
+    
+    payload = {
+        "api_key": os.getenv("TAVILY_API_KEY"),
+        "query": query,
+        "search_depth": "basic",  # or "advanced" for deeper search
+        "include_answer": False,
+        "include_raw_content": include_content,
+        "max_results": min(num_results, 10),  # Tavily max is 10
+        "include_domains": [],  # Can restrict to specific domains if needed
+        "exclude_domains": []
+    }
+    
+    try:
+        with httpx.Client() as client:
+            response = client.post(endpoint, headers=headers, json=payload, timeout=15.0)
+            response.raise_for_status()
+            data = response.json()
+        
+        results = []
+        search_results = data.get("results", [])
+        
+        for result in search_results[:num_results]:
+            results.append(SearchResult(
+                title=result.get("title", ""),
+                url=result.get("url", ""),
+                snippet=result.get("content", ""),
+                content=result.get("raw_content", "")  # Full page content!
+            ))
+        
+        print(f"[SEARCH] Tavily returned {len(results)} results for: '{query}'")
+        return results
+        
+    except httpx.HTTPError as e:
+        print(f"[SEARCH] Tavily API error: {e}, falling back to Brave")
+        brave_api_key = os.getenv("BRAVE_API_KEY")
+        if brave_api_key:
+            return _brave_search(query, num_results)
+        return _mock_search(query, num_results)
+    except Exception as e:
+        print(f"[SEARCH] Tavily unexpected error: {e}, falling back to Brave")
+        brave_api_key = os.getenv("BRAVE_API_KEY")
+        if brave_api_key:
+            return _brave_search(query, num_results)
+        return _mock_search(query, num_results)
+
+
+def _brave_search(query: str, num_results: int) -> List[SearchResult]:
+    """
+    Perform search using Brave Search API (fallback).
+    
+    Note: Brave only provides search results, not full content.
+    You'll need to use scraper.py to fetch content.
+    
+    Args:
+        query: Search query
+        num_results: Number of results
+    
+    Returns:
+        List of SearchResult objects
+    """
+    base_url = os.getenv("BRAVE_BASE_URL", "https://api.search.brave.com/res/v1")
+    endpoint = f"{base_url}/web/search"
+    
+    brave_api_key = os.getenv("BRAVE_API_KEY")
+    
+    headers = {
+        "Accept": "application/json",
+        "X-Subscription-Token": brave_api_key
+    }
+    
+    params = {
+        "q": query,
+        "count": min(num_results, 20),  # Brave max is 20 per request
+        "safesearch": "off"
+    }
+    
+    try:
+        with httpx.Client() as client:
+            response = client.get(endpoint, headers=headers, params=params, timeout=10.0)
+            response.raise_for_status()
+            data = response.json()
+        
+        results = []
+        web_results = data.get("web", {}).get("results", [])
+        
+        for result in web_results[:num_results]:
+            results.append(SearchResult(
+                title=result.get("title", ""),
+                url=result.get("url", ""),
+                snippet=result.get("description", ""),
+                content=""  # Brave doesn't provide full content
+            ))
+        
+        print(f"[SEARCH] Brave API returned {len(results)} results for: '{query}'")
+        return results
+        
+    except httpx.HTTPError as e:
+        print(f"[SEARCH] Brave API error: {e}, falling back to mock")
+        return _mock_search(query, num_results)
+    except Exception as e:
+        print(f"[SEARCH] Brave unexpected error: {e}, falling back to mock")
+        return _mock_search(query, num_results)
+
+
+def _mock_search(query: str, num_results: int) -> List[SearchResult]:
+    """
+    Mock search results for testing without API keys.
+    
+    Args:
+        query: Search query
+        num_results: Number of results
+    
+    Returns:
+        List of mock SearchResult objects
+    """
+    # Generate realistic mock URLs based on query
+    query_slug = query.lower().replace(" ", "-").replace(".", "")[:50]
+    
+    mock_results = [
+        SearchResult(
+            title=f"Understanding {query.title()} - Complete Guide",
+            url=f"https://example.com/guides/{query_slug}-guide",
+            snippet=f"A comprehensive guide to {query}. Learn everything you need to know about this topic with practical examples and expert insights.",
+            content=f"This is mock content for {query}. In production, this would be the full page content from Tavily API."
+        ),
+        SearchResult(
+            title=f"{query.title()}: Best Practices and Tips",
+            url=f"https://devblog.io/posts/{query_slug}-best-practices",
+            snippet=f"Discover best practices for {query}. This article covers common pitfalls, optimization techniques, and real-world applications.",
+            content=f"Mock content about {query} best practices. Tavily would return actual page content here."
+        ),
+        SearchResult(
+            title=f"Introduction to {query.title()} | Tech Docs",
+            url=f"https://docs.example.org/intro/{query_slug}",
+            snippet=f"Getting started with {query}. Step-by-step tutorials and documentation for beginners and advanced users.",
+            content=f"Mock tutorial content for {query}."
+        ),
+        SearchResult(
+            title=f"{query.title()} - Community Discussion",
+            url=f"https://reddit.com/r/technology/comments/{query_slug}",
+            snippet=f"Community discussion about {query}. Read experiences, tips, and recommendations from practitioners in the field.",
+            content=f"Mock community discussion about {query}."
+        ),
+        SearchResult(
+            title=f"Advanced {query.title()} Techniques",
+            url=f"https://medium.com/@expert/{query_slug}-advanced",
+            snippet=f"Deep dive into advanced {query} techniques. Learn from industry experts and take your skills to the next level.",
+            content=f"Mock advanced content for {query}."
+        ),
+    ]
+    
+    return mock_results[:num_results]
+
+
+# Test function
+def _test_search():
+    """Test the search function."""
+    print("="*60)
+    print("Testing web_search() with Tavily")
+    print("="*60)
+    
+    test_queries = [
+        "Python async programming",
+        "Machine learning best practices",
+    ]
+    
+    for query in test_queries:
+        print(f"\n{'='*60}")
+        print(f"Query: {query}")
+        print("="*60)
+        results = web_search(query, num_results=3, include_content=True)
+        
+        for i, result in enumerate(results, 1):
+            print(f"\n{i}. {result.title}")
+            print(f"   URL: {result.url}")
+            print(f"   Snippet: {result.snippet[:100]}...")
+            print(f"   Content length: {len(result.content)} chars")
+    
+    print("\n" + "="*60)
+    print("Test complete!")
+    print("="*60)
+
+
+if __name__ == "__main__":
+    _test_search()
+
+
+
+================================================================
+File: ./utils/__init__.py
+================================================================
+"""
+Utility functions for the Draft Daemon application.
+"""
+
+from .llm_client import LLMClient
+from .parser import extract_markdown_spec, extract_project_name, is_spec_complete
+from .file_system_writer import FileSystemWriter
+
+__all__ = ["LLMClient", "extract_markdown_spec", "extract_project_name", "is_spec_complete", "FileSystemWriter"]
+
+
+
+================================================================
+File: ./workflows/flow.py
+================================================================
+"""
+Pocket Flow definition for the Spec Interviewer.
+Using AsyncFlow for NiceGUI compatibility.
+"""
+
+from pocketflow import AsyncFlow
+from .nodes import ChatInputNode, LLMEvaluateNode, GenerateSpecNode
+
+
+def create_spec_interviewer_flow():
+    """
+    Create and return the Spec Interviewer flow.
+    """
+    # Create node instances
+    chat_input_node = ChatInputNode()
+    llm_evaluate_node = LLMEvaluateNode()
+    generate_spec_node = GenerateSpecNode()
+    
+    # Create flow connections
+    chat_input_node - "evaluate" >> llm_evaluate_node
+    llm_evaluate_node - "continue" >> chat_input_node
+    llm_evaluate_node - "generate" >> generate_spec_node
+    
+    # Create AsyncFlow
+    return AsyncFlow(start=chat_input_node)
+
+
+
+================================================================
+File: ./workflows/nodes.py
+================================================================
+"""
+Pocket Flow Node definitions for the Spec Interviewer chat loop.
+Using AsyncNode for NiceGUI compatibility.
+"""
+
+from pocketflow import AsyncNode
+from utils.parser import extract_markdown_spec, extract_project_name, is_spec_complete
+
+
+class ChatInputNode(AsyncNode):
+    """
+    Gets user input from the shared store (set by NiceGUI UI).
+    """
+    
+    async def prep_async(self, shared):
+        # Initialize messages if first run
+        if "messages" not in shared:
+            shared["messages"] = []
+        if "chat_history" not in shared:
+            shared["chat_history"] = []
+        
+        # Get user input from shared (set by UI)
+        user_input = shared.get("user_input", "")
+        return user_input
+    
+    async def exec_async(self, user_input):
+        # Just pass through - user_input came from prep
+        return user_input
+    
+    async def post_async(self, shared, prep_res, exec_res):
+        user_input = exec_res
+        
+        if not user_input:
+            return None  # End if no input
+        
+        # Store user input
+        shared["messages"].append({"role": "user", "content": user_input})
+        shared["chat_history"].append({"role": "user", "content": user_input})
+        
+        # Move to LLM evaluation
+        return "evaluate"
+
+
+class LLMEvaluateNode(AsyncNode):
+    """
+    Calls the LLM to evaluate the conversation and generate response.
+    """
+    
+    def __init__(self, llm_client=None):
+        super().__init__()
+        self._llm_client = llm_client
+    
+    def set_llm_client(self, client):
+        self._llm_client = client
+    
+    async def prep_async(self, shared):
+        # Get chat history for LLM
+        chat_history = shared.get("chat_history", [])
+        system_prompt = shared.get("system_prompt", "")
+        
+        # Build messages array
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(chat_history)
+        
+        return messages
+    
+    async def exec_async(self, messages):
+        # Call LLM with the conversation history
+        if self._llm_client is None:
+            from utils.llm_client import LLMClient
+            self._llm_client = LLMClient(
+                base_url="http://localhost:11434/v1",
+                api_key="ollama",
+                model="gemma3-12b-32k:latest"
+            )
+        
+        # Async call - won't block NiceGUI
+        response = await self._llm_client.chat_async(messages)
+        return response
+    
+    async def post_async(self, shared, prep_res, exec_res):
+        llm_response = exec_res
+        
+        if not llm_response:
+            llm_response = "Error: LLM did not return a response."
+        
+        # Store response
+        shared["llm_response"] = llm_response
+        shared["messages"].append({"role": "assistant", "content": llm_response})
+        shared["chat_history"].append({"role": "assistant", "content": llm_response})
+        
+        # Check if spec is complete
+        spec_complete = is_spec_complete(llm_response)
+        shared["spec_complete"] = spec_complete
+        
+        if spec_complete:
+            return "generate"
+        else:
+            return "continue"  # Continue conversation
+
+
+class GenerateSpecNode(AsyncNode):
+    """
+    Extracts and saves the final specification.
+    """
+    
+    async def prep_async(self, shared):
+        llm_response = shared.get("llm_response", "")
+        return llm_response
+    
+    async def exec_async(self, llm_response):
+        # Parse the spec
+        spec_content = extract_markdown_spec(llm_response)
+        project_name = extract_project_name(spec_content)
+        return (spec_content, project_name)
+    
+    async def post_async(self, shared, prep_res, exec_res):
+        spec_content, project_name = exec_res
+        
+        # Write to file system
+        from utils.file_system_writer import FileSystemWriter
+        writer = FileSystemWriter()
+        project_dir, spec_path = writer.write_spec(spec_content, project_name)
+        
+        # Store results
+        shared["final_spec"] = spec_content
+        shared["project_name"] = project_name
+        shared["spec_file_path"] = str(spec_path)
+        
+        print(f"\n[GenerateSpec] Spec saved to: {spec_path}")
+        
+        return "done"
+
+
+
+================================================================
+File: ./workflows/research.py
+================================================================
+"""
+Pocket Flow nodes for the Research Engine.
+
+Following Pocket Flow architecture with AsyncNode for NiceGUI compatibility.
+"""
+
+from pocketflow import AsyncNode, AsyncParallelBatchNode
+from utils.search import web_search, SearchResult
+from utils.scraper import scrape_url, ScrapedContent
+from utils.llm_client import LLMClient
+
+
+# =============================================================================
+# QueryExtractionNode
+# =============================================================================
+
+class QueryExtractionNode(AsyncNode):
+    """
+    Reads the project spec and extracts search queries for research.
+    
+    Shared Store:
+    - Reads: 'spec_content' - The project specification text
+    - Writes: 'search_queries' - List of search query strings
+    """
+    
+    def __init__(self, llm_client=None):
+        super().__init__()
+        self._llm_client = llm_client
+    
+    def set_llm_client(self, client):
+        """Inject LLM client."""
+        self._llm_client = client
+    
+    async def prep_async(self, shared):
+        """Read spec content from shared store."""
+        spec_content = shared.get("spec_content", "")
+        
+        if not spec_content:
+            print("[QueryExtraction] No spec content found in shared store")
+            return ""
+        
+        return spec_content
+    
+    async def exec_async(self, spec_content):
+        """
+        Extract search queries from the spec using LLM.
+        
+        Uses a simple prompt to generate 3-5 targeted search queries.
+        """
+        if not spec_content:
+            return []
+        
+        if self._llm_client is None:
+            self._llm_client = LLMClient(
+                base_url="http://localhost:11434/v1",
+                api_key="ollama",
+                model="gemma3-12b-32k:latest"
+            )
+        
+        # Simple extraction prompt - optimize later
+        prompt = f"""Read the following project specification and extract 3-5 specific search queries that would help research this topic.
+
+Focus on:
+- Key technologies mentioned
+- Best practices and patterns
+- Common challenges and solutions
+
+Format your response as a JSON array of strings, like this:
+["query 1", "query 2", "query 3"]
+
+Project Specification:
+{spec_content[:2000]}  # Limit to avoid token limits
+
+Search queries:"""
+        
+        messages = [{"role": "user", "content": prompt}]
+        
+        try:
+            response = await self._llm_client.chat_async(messages)
+            
+            # Parse JSON array from response
+            import json
+            import re
+            
+            # Try to extract JSON array
+            json_match = re.search(r'\[.*?\]', response, re.DOTALL)
+            if json_match:
+                queries = json.loads(json_match.group(0))
+                print(f"[QueryExtraction] Extracted {len(queries)} queries from spec")
+                return queries
+            else:
+                # Fallback: split by lines
+                queries = [q.strip().strip('"\'-') for q in response.split('\n') if q.strip()]
+                queries = [q for q in queries if len(q) > 5]  # Filter short queries
+                print(f"[QueryExtraction] Extracted {len(queries)} queries (fallback parsing)")
+                return queries[:5]  # Limit to 5
+                
+        except Exception as e:
+            print(f"[QueryExtraction] Error extracting queries: {e}")
+            # Return default queries based on spec title
+            title = spec_content.split('\n')[0].replace('#', '').strip() if spec_content else "Research"
+            return [
+                f"{title} best practices",
+                f"{title} tutorial",
+                f"{title} examples"
+            ]
+    
+    async def post_async(self, shared, prep_res, exec_res):
+        """Store queries in shared store and proceed to search/scrape."""
+        queries = exec_res
+        
+        shared["search_queries"] = queries
+        
+        print(f"[QueryExtraction] Queries: {queries}")
+        
+        return "search"
+
+
+# =============================================================================
+# SearchAndScrapeNode (AsyncParallelBatchNode)
+# =============================================================================
+
+class SearchAndScrapeNode(AsyncParallelBatchNode):
+    """
+    Executes web searches and scrapes URLs in parallel.
+    
+    Shared Store:
+    - Reads: 'search_queries' - List of search queries
+    - Writes: 'scraped_content' - List of ScrapedContent dicts
+    """
+    
+    def __init__(self, num_results: int = 3):
+        super().__init__()
+        self.num_results = num_results
+    
+    async def prep_async(self, shared):
+        """
+        Prepare list of search queries to process in parallel.
+        Each query will be processed concurrently.
+        """
+        queries = shared.get("search_queries", [])
+        print(f"[SearchAndScrape] Preparing to search {len(queries)} queries")
+        return queries
+    
+    async def exec_async(self, query):
+        """
+        Execute search for a single query.
+        With Tavily, content is already included - no separate scraping needed!
+        This runs in parallel for all queries.
+        """
+        print(f"[SearchAndScrape] Searching: {query}")
+        
+        # Search (Tavily returns content included)
+        search_results = web_search(query, num_results=self.num_results, include_content=True)
+        
+        # Convert to scraped format
+        scraped = []
+        for result in search_results:
+            scraped.append({
+                "query": query,
+                "url": result.url,
+                "title": result.title,
+                "content": result.content,  # Tavily provides this!
+                "success": bool(result.content),
+                "source": "tavily"
+            })
+        
+        print(f"[SearchAndScrape] Got {len(scraped)} results with content for: {query}")
+        return scraped
+    
+    async def post_async(self, shared, prep_res, exec_res_list):
+        """
+        Combine all scraped content and store in shared.
+        exec_res_list contains results from all parallel query executions.
+        """
+        # Flatten all scraped content
+        all_scraped = []
+        for query_results in exec_res_list:
+            all_scraped.extend(query_results)
+        
+        successful = sum(1 for item in all_scraped if item.get("success", False))
+        print(f"[SearchAndScrape] Collected {successful}/{len(all_scraped)} successful scrapes")
+        
+        shared["scraped_content"] = all_scraped
+        
+        return "distill"
+
+
+# =============================================================================
+# DistillationNode
+# =============================================================================
+
+class DistillationNode(AsyncNode):
+    """
+    Distills scraped content into key insights and soundbites.
+    
+    Shared Store:
+    - Reads: 'scraped_content' - List of scraped content
+    - Writes: 'distilled_nuggets', 'vignettes' - Extracted insights
+    """
+    
+    def __init__(self, llm_client=None):
+        super().__init__()
+        self._llm_client = llm_client
+    
+    def set_llm_client(self, client):
+        """Inject LLM client."""
+        self._llm_client = client
+    
+    async def prep_async(self, shared):
+        """Prepare scraped content for distillation."""
+        scraped_content = shared.get("scraped_content", [])
+        
+        # Combine all content
+        combined = []
+        for item in scraped_content:
+            if item.get("success"):
+                combined.append(f"Source: {item.get('url', 'Unknown')}\n{item.get('content', '')}")
+        
+        full_text = "\n\n---\n\n".join(combined)
+        print(f"[Distillation] Processing {len(combined)} sources ({len(full_text)} chars)")
+        
+        return full_text
+    
+    async def exec_async(self, scraped_text):
+        """
+        Extract distilled nuggets and vignettes from scraped content.
+        
+        Basic extraction prompt - will be optimized later.
+        """
+        if not scraped_text:
+            return {"nuggets": [], "vignettes": []}
+        
+        if self._llm_client is None:
+            self._llm_client = LLMClient(
+                base_url="http://localhost:11434/v1",
+                api_key="ollama",
+                model="gemma3-12b-32k:latest"
+            )
+        
+        # Simple distillation prompt
+        prompt = f"""Extract key insights from the following research content.
+
+Return TWO sections:
+
+## Distilled Nuggets
+- Bullet points of key facts, best practices, and actionable insights
+- Each point should be concise and cited with [Source URL]
+
+## Vignettes / Soundbites  
+- Short anecdotes, examples, or illustrative quotes
+- Include the source for each
+
+Format as markdown.
+
+Research Content:
+{scraped_text[:3000]}  # Limit to avoid token limits
+
+Extraction:"""
+        
+        messages = [{"role": "user", "content": prompt}]
+        
+        try:
+            response = await self._llm_client.chat_async(messages)
+            print(f"[Distillation] Generated {len(response)} chars of insights")
+            return response
+        except Exception as e:
+            print(f"[Distillation] Error: {e}")
+            return "Error distilling content. Please try again."
+    
+    async def post_async(self, shared, prep_res, exec_res):
+        """Store distilled content in shared."""
+        shared["distilled_content"] = exec_res
+        
+        return "write"
+
+
+# =============================================================================
+# ResearchWriterNode
+# =============================================================================
+
+class ResearchWriterNode(AsyncNode):
+    """
+    Writes the final research report to the file system.
+    
+    Shared Store:
+    - Reads: 'distilled_content', 'project_name'
+    - Writes: 'research_file_path'
+    """
+    
+    async def prep_async(self, shared):
+        """Get content and project info from shared."""
+        return {
+            "distilled_content": shared.get("distilled_content", ""),
+            "project_name": shared.get("project_name", "Research"),
+            "spec_file_path": shared.get("spec_file_path", "")
+        }
+    
+    async def exec_async(self, prep_res):
+        """Write research report to file system."""
+        from pathlib import Path
+        from datetime import datetime
+        
+        distilled = prep_res["distilled_content"]
+        project_name = prep_res["project_name"]
+        spec_path = prep_res["spec_file_path"]
+        
+        # Determine output directory
+        if spec_path:
+            # Write to same directory as spec
+            output_dir = Path(spec_path).parent
+        else:
+            # Fallback to Research subdirectory
+            output_dir = Path.cwd() / "Writing_System_Dev" / "Projects" / project_name / "Research"
+            output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"02_Research_{timestamp}.md"
+        output_path = output_dir / filename
+        
+        # Write content
+        output_path.write_text(distilled, encoding='utf-8')
+        
+        print(f"[ResearchWriter] Saved research to: {output_path}")
+        
+        return str(output_path)
+    
+    async def post_async(self, shared, prep_res, exec_res):
+        """Store file path and complete."""
+        shared["research_file_path"] = exec_res
+        
+        return "done"
+
+
+
+================================================================
+File: ./workflows/research_flow.py
+================================================================
+"""
+Pocket Flow definition for the Research Engine.
+
+Uses AsyncFlow for NiceGUI compatibility.
+"""
+
+from pocketflow import AsyncFlow
+from .research import (
+    QueryExtractionNode,
+    SearchAndScrapeNode,
+    DistillationNode,
+    ResearchWriterNode
+)
+
+
+def create_research_flow():
+    """
+    Create and return the Research Engine flow.
+    
+    Flow structure:
+    QueryExtractionNode -> SearchAndScrapeNode -> DistillationNode -> ResearchWriterNode
+    """
+    # Create node instances
+    query_node = QueryExtractionNode()
+    search_scrape_node = SearchAndScrapeNode(num_results=3)
+    distill_node = DistillationNode()
+    write_node = ResearchWriterNode()
+    
+    # Create flow connections
+    query_node - "search" >> search_scrape_node
+    search_scrape_node - "distill" >> distill_node
+    distill_node - "write" >> write_node
+    
+    # Create AsyncFlow
+    return AsyncFlow(start=query_node)
+
+
+
+================================================================
+File: ./workflows/__init__.py
+================================================================
+"""
+Workflows package for Draft Daemon.
+Contains Pocket Flow Node definitions for the Spec Interviewer.
+"""
+
+from .nodes import ChatInputNode, LLMEvaluateNode, GenerateSpecNode
+
+__all__ = ["ChatInputNode", "LLMEvaluateNode", "GenerateSpecNode"]
+
+
+
