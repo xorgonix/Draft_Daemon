@@ -10,7 +10,7 @@ openspec/changes/init-core-system/design.md
 - The "Spec Interviewer" must not be a massive, monolithic while-loop. It must be implemented as a `pocketflow` Flow.
 - **Expected Nodes:**
   - `ChatInputNode`: Waits for and retrieves the user's message from the NiceGUI interface.
-  - `LLMEvaluateNode`: Prompts the local UMM Server to decide if the spec is complete or if more questions are needed.
+  - `LLMEvaluateNode`: Prompts the local Ollama server to decide if the spec is complete or if more questions are needed.
   - `GenerateSpecNode`: Triggered only when the LLM resolves the conversation. Formats the OpenSpec markdown.
 - **State Management:** The chat history and the current template rules must be maintained inside the Pocket Flow `Shared Store` dictionary so all nodes have access to the context.
 
