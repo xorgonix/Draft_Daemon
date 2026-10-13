@@ -6,7 +6,7 @@ The system is a local-first, agentic writing environment acting as an editorial 
 ## 2. Technology Stack
 - **Backend & GUI:** Python 3.11+ using `nicegui` for a component-driven, reactive frontend, pocketflow for llm agentic capabilities.
 - **Database:** SurrealDB (handles graph relations, raw text storage, and vector embeddings).
-- **LLM Orchestration:** Ollama (local LLM, OpenAI-compatible API).
+- **LLM Orchestration:** local LLM server via OpenAI-compatible endpoint (Ollama, LM Studio, Strata, or similar).
 - **File System:** The primary interface for reading/writing finished text is the user's Obsidian Vault (strict Markdown with YAML frontmatter).
 
 ## 3. Core Directives
